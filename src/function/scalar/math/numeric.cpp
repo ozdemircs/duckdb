@@ -13,6 +13,7 @@
 #include <cmath>
 #include <errno.h>
 
+#include <iostream>
 namespace duckdb {
 
 template <class TR, class OP>
@@ -303,11 +304,10 @@ void SignFun::RegisterFunction(BuiltinFunctions &set) {
 //===--------------------------------------------------------------------===//
 struct CeilOperator {
 	template <class TA, class TR>
-	static inline TR Operation(TA left) {
-		return std::ceil(left);
+	static inline TR Operation(TA input) {
+		return std::ceil(input);
 	}
 };
-
 template <class T, class POWERS_OF_TEN, class OP>
 static void GenericRoundFunctionDecimal(DataChunk &input, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
@@ -395,8 +395,8 @@ void CeilFun::RegisterFunction(BuiltinFunctions &set) {
 //===--------------------------------------------------------------------===//
 struct FloorOperator {
 	template <class TA, class TR>
-	static inline TR Operation(TA left) {
-		return std::floor(left);
+	static inline TR Operation(TA input) {
+		return std::floor(input);
 	}
 };
 
@@ -446,19 +446,33 @@ void FloorFun::RegisterFunction(BuiltinFunctions &set) {
 //===--------------------------------------------------------------------===//
 // round
 //===--------------------------------------------------------------------===//
+template <class OP>
+struct RoundOperatorWithOptions {
+	template<class TA, class TR>
+	static inline TR Operation(TA input) {
+		TR rounded_value = OP::template Operation<TA, TR>(input);
+		if (std::isinf(rounded_value) || std::isnan(rounded_value)) {
+			return input;
+		}
+		return rounded_value;
+	}
+};
+
+
+template <class OP>
 struct RoundOperatorPrecision {
 	template <class TA, class TB, class TR>
 	static inline TR Operation(TA input, TB precision) {
 		double rounded_value;
 		if (precision < 0) {
 			double modifier = std::pow(10, -precision);
-			rounded_value = (std::round(input / modifier)) * modifier;
+			rounded_value = (OP::template Operation<TA, double>(input / modifier)) * modifier;
 			if (std::isinf(rounded_value) || std::isnan(rounded_value)) {
 				return 0;
 			}
 		} else {
 			double modifier = std::pow(10, precision);
-			rounded_value = (std::round(input * modifier)) / modifier;
+			rounded_value = ((OP::template Operation<TA, double>(input * modifier))) / modifier;
 			if (std::isinf(rounded_value) || std::isnan(rounded_value)) {
 				return input;
 			}
@@ -467,16 +481,164 @@ struct RoundOperatorPrecision {
 	}
 };
 
+// TRUNCATE: always round toward zero.
+struct TruncateOperator {
+	template <class TA, class TR>
+	static inline TR Operation(TA input) {
+		return std::trunc(input);
+	}
+};
+
+
+// AWAY_FROM_ZERO: round negative values with FLOOR rule, round positive values with CEILING rule
+struct AwayFromZero {
+	template <class TA, class TR>
+	static inline TR Operation(TA input) {
+		if (input < 0) {
+			return std::floor(input);
+		} else {
+			return std::ceil(input);
+		}
+	}
+};
+
+// TIE_DOWN: round ties with FLOOR rule
+struct TieDown {
+	template <class TA, class TR>
+	static inline TR Operation(TA input) {
+		return std::ceil(input - 0.5);
+	}
+};
+
+
+// TIE_UP: round ties with CEILING rule
+struct TieUp {
+	template <class TA, class TR>
+	static inline TR Operation(TA input) {
+		return std::floor(input + 0.5);
+	}
+};
+
+// TIE_TOWARDS_ZERO: round ties with TRUNCATE rule
+struct TieTowardsZero {
+	template <class TA, class TR>
+	static inline TR Operation(TA input) {
+		if (input > 0) {
+			return std::ceil(input - 0.5);
+		} else {
+			return std::floor(input + 0.5);
+		}
+	}
+};
+// TIE_TO_ODD: round to nearest value; if exactly halfway, tie to the odd option.
+struct TieToOdd {
+	template <class TA, class TR>
+	static inline TR Operation(TA input) {
+		throw NotImplementedException("FIXME: TIE_TO_EVEN is not implemented");
+	}
+};
+
+// TIE_TO_EVEN: round to nearest value; if exactly halfway, tie to the even option.
+struct TieToEven {
+	template <class TA, class TR>
+	static inline TR Operation(TA input) {
+		throw NotImplementedException("FIXME: TIE_TO_EVEN is not implemented");
+	}
+};
+
+// TIE_AWAY_FROM_ZERO: round to nearest value; if exactly halfway, tie away from zero.
+struct TieAwayFromZero {
+	template <class TA, class TR>
+	static inline TR Operation(TA input) {
+		if (input > 0) {
+			return std::floor(input + 0.5);
+		} else {
+			return std::ceil(input - 0.5);
+		}
+	}
+};
+
+template <class T>
+static unique_ptr<FunctionData> RoundFunctionPrecisionBind(ClientContext &context, ScalarFunction &bound_function,
+                                                  vector<unique_ptr<Expression>> &arguments) {
+	if (!arguments[2]->IsFoldable()) {
+		throw InvalidInputException("option name must be a constant");
+	}
+	// get the function name
+	Value function_value = ExpressionExecutor::EvaluateScalar(context, *arguments[2]);
+	string operation = function_value.ToString();
+	std::cout << operation << std::endl;
+	if (operation == "TIE_UP") {
+		bound_function.function = ScalarFunction::BinaryFunction<T, int32_t, T, RoundOperatorPrecision<TieUp>>;
+	} else if (operation == "TIE_DOWN") {
+		bound_function.function = ScalarFunction::BinaryFunction<T, int32_t, T, RoundOperatorPrecision<TieDown>>;
+	} else if (operation == "TIE_AWAY_FROM_ZERO") {
+		bound_function.function = ScalarFunction::BinaryFunction<T, int32_t, T, RoundOperatorPrecision<TieAwayFromZero>>;
+	} else if (operation == "TIE_TO_ODD") {
+		bound_function.function = ScalarFunction::BinaryFunction<T, int32_t, T, RoundOperatorPrecision<TieToOdd>>;
+	} else if (operation == "TIE_TO_EVEN") {
+		bound_function.function = ScalarFunction::BinaryFunction<T, int32_t, T, RoundOperatorPrecision<TieToEven>>;
+	} else if (operation == "TIE_TOWARDS_ZERO") {
+		bound_function.function = ScalarFunction::BinaryFunction<T, int32_t, T, RoundOperatorPrecision<TieTowardsZero>>;
+	} else if (operation == "AWAY_FROM_ZERO") {
+		bound_function.function = ScalarFunction::BinaryFunction<T, int32_t, T, RoundOperatorPrecision<AwayFromZero>>;
+	} else if (operation == "CEILING") {
+		bound_function.function = ScalarFunction::BinaryFunction<T, int32_t, T, RoundOperatorPrecision<CeilOperator>>;
+	} else if (operation == "FLOOR") {
+		bound_function.function = ScalarFunction::BinaryFunction<T, int32_t, T, RoundOperatorPrecision<FloorOperator>>;
+	} else if (operation == "TRUNCATE") {
+		bound_function.function = ScalarFunction::BinaryFunction<T, int32_t, T, RoundOperatorPrecision<TruncateOperator>>;
+	}
+	else {
+		throw NotImplementedException("Option %s has not been implemented.", operation);
+	}
+	return nullptr;
+}
+
+template <class T>
+static unique_ptr<FunctionData> RoundFunctionBind(ClientContext &context, ScalarFunction &bound_function,
+                                                  vector<unique_ptr<Expression>> &arguments) {
+	if (!arguments[1]->IsFoldable()) {
+		throw InvalidInputException("option name must be a constant");
+	}
+	// get the function name
+	Value function_value = ExpressionExecutor::EvaluateScalar(context, *arguments[1]);
+	string operation = function_value.ToString();
+	std::cout << operation << std::endl;
+	if (operation == "TIE_UP") {
+		bound_function.function = ScalarFunction::UnaryFunction<T, T, RoundOperatorWithOptions<TieUp>>;
+	} else if (operation == "TIE_DOWN") {
+		bound_function.function = ScalarFunction::UnaryFunction<T, T, RoundOperatorWithOptions<TieDown>>;
+	} else if (operation == "TIE_AWAY_FROM_ZERO") {
+		bound_function.function = ScalarFunction::UnaryFunction<T, T, RoundOperatorWithOptions<TieAwayFromZero>>;
+	} else if (operation == "TIE_TO_ODD") {
+		bound_function.function = ScalarFunction::UnaryFunction<T, T, RoundOperatorWithOptions<TieToOdd>>;
+	} else if (operation == "TIE_TO_EVEN") {
+		bound_function.function = ScalarFunction::UnaryFunction<T, T, RoundOperatorWithOptions<TieToEven>>;
+	} else if (operation == "TIE_TOWARDS_ZERO") {
+		bound_function.function = ScalarFunction::UnaryFunction<T, T, RoundOperatorWithOptions<TieTowardsZero>>;
+	} else if (operation == "AWAY_FROM_ZERO") {
+		bound_function.function = ScalarFunction::UnaryFunction<T, T, RoundOperatorWithOptions<AwayFromZero>>;
+	} else if (operation == "CEILING") {
+		bound_function.function = ScalarFunction::UnaryFunction<T, T, RoundOperatorWithOptions<CeilOperator>>;
+	} else if (operation == "FLOOR") {
+		bound_function.function = ScalarFunction::UnaryFunction<T, T, RoundOperatorWithOptions<FloorOperator>>;
+	} else if (operation == "TRUNCATE") {
+		bound_function.function = ScalarFunction::UnaryFunction<T, T, RoundOperatorWithOptions<TruncateOperator>>;
+	}
+	else {
+		throw NotImplementedException("Option %s has not been implemented.", operation);
+	}
+	return nullptr;
+}
+
 struct RoundOperator {
 	template <class TA, class TR>
 	static inline TR Operation(TA input) {
-		double rounded_value = round(input);
-		if (std::isinf(rounded_value) || std::isnan(rounded_value)) {
-			return input;
-		}
-		return rounded_value;
+		return round(input);
 	}
 };
+
 
 struct RoundDecimalOperator {
 	template <class T, class POWERS_OF_TEN_CLASS>
@@ -639,12 +801,12 @@ void RoundFun::RegisterFunction(BuiltinFunctions &set) {
 		}
 		switch (type.id()) {
 		case LogicalTypeId::FLOAT:
-			round_func = ScalarFunction::UnaryFunction<float, float, RoundOperator>;
-			round_prec_func = ScalarFunction::BinaryFunction<float, int32_t, float, RoundOperatorPrecision>;
+			round_func = ScalarFunction::UnaryFunction<float, float, RoundOperatorWithOptions<RoundOperator>>;
+			round_prec_func = ScalarFunction::BinaryFunction<float, int32_t, float, RoundOperatorPrecision<RoundOperator>>;
 			break;
 		case LogicalTypeId::DOUBLE:
-			round_func = ScalarFunction::UnaryFunction<double, double, RoundOperator>;
-			round_prec_func = ScalarFunction::BinaryFunction<double, int32_t, double, RoundOperatorPrecision>;
+			round_func = ScalarFunction::UnaryFunction<double, double, RoundOperatorWithOptions<RoundOperator>>;
+			round_prec_func = ScalarFunction::BinaryFunction<double, int32_t, double, RoundOperatorPrecision<RoundOperator>>;
 			break;
 		case LogicalTypeId::DECIMAL:
 			bind_func = BindGenericRoundFunctionDecimal<RoundDecimalOperator>;
@@ -656,6 +818,10 @@ void RoundFun::RegisterFunction(BuiltinFunctions &set) {
 		round.AddFunction(ScalarFunction({type}, type, round_func, bind_func));
 		round.AddFunction(ScalarFunction({type, LogicalType::INTEGER}, type, round_prec_func, bind_prec_func));
 	}
+	round.AddFunction(ScalarFunction{{LogicalType::DOUBLE, LogicalType::VARCHAR}, LogicalType::DOUBLE, nullptr, RoundFunctionBind<double>});
+	round.AddFunction(ScalarFunction{{LogicalType::FLOAT, LogicalType::VARCHAR}, LogicalType::FLOAT, nullptr, RoundFunctionBind<float>});
+	round.AddFunction(ScalarFunction{{LogicalType::DOUBLE, LogicalType::INTEGER, LogicalType::VARCHAR}, LogicalType::DOUBLE, nullptr, RoundFunctionPrecisionBind<double>});
+	round.AddFunction(ScalarFunction{{LogicalType::FLOAT, LogicalType::INTEGER, LogicalType::VARCHAR}, LogicalType::FLOAT, nullptr, RoundFunctionPrecisionBind<float>});
 	set.AddFunction(round);
 }
 
