@@ -13,7 +13,6 @@
 #include <cmath>
 #include <errno.h>
 
-#include <iostream>
 namespace duckdb {
 
 template <class TR, class OP>
@@ -567,7 +566,6 @@ static unique_ptr<FunctionData> RoundFunctionPrecisionBind(ClientContext &contex
 	// get the function name
 	Value function_value = ExpressionExecutor::EvaluateScalar(context, *arguments[2]);
 	string operation = function_value.ToString();
-	std::cout << operation << std::endl;
 	if (operation == "TIE_UP") {
 		bound_function.function = ScalarFunction::BinaryFunction<T, int32_t, T, RoundOperatorPrecision<TieUp>>;
 	} else if (operation == "TIE_DOWN") {
