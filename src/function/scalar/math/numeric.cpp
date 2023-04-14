@@ -602,7 +602,6 @@ static unique_ptr<FunctionData> RoundFunctionBind(ClientContext &context, Scalar
 	// get the function name
 	Value function_value = ExpressionExecutor::EvaluateScalar(context, *arguments[1]);
 	string operation = function_value.ToString();
-	std::cout << operation << std::endl;
 	if (operation == "TIE_UP") {
 		bound_function.function = ScalarFunction::UnaryFunction<T, T, RoundOperatorWithOptions<TieUp>>;
 	} else if (operation == "TIE_DOWN") {
